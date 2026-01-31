@@ -18,6 +18,7 @@ const JWT_SECRET = process.env.JWT_SECRET || 'patent-secret-key-2024';
 const db = {
   enterprises: [],
   users: [],
+  disclosures: [],
   aiConfigs: {},
   promptConfigs: {},
   templateConfigs: {},
@@ -102,8 +103,8 @@ function initData() {
 
   // 提示词配置
   db.promptConfigs[demoEnterprise.id] = [
-    { id: uuidv4(), type: 'POLISH', name: '默认润色提示词', content: '你是一位资深的专利代理人...', isDefault: true, isActive: true, version: 1 },
-    { id: uuidv4(), type: 'EXTRACT', name: '默认提取提示词', content: '你是一位专业的专利分析师...', isDefault: true, isActive: true, version: 1 }
+    { id: uuidv4(), type: 'POLISH', name: '默认润色提示词', content: '你是一位资深的专利代理人，请帮我优化以下专利交底书内容，使其更加专业、清晰、完整。', isDefault: true, isActive: true, version: 1 },
+    { id: uuidv4(), type: 'EXTRACT', name: '默认提取提示词', content: '你是一位专业的专利分析师，请从以下文档中提取专利交底书所需的关键信息。', isDefault: true, isActive: true, version: 1 }
   ];
 
   // 字段配置
@@ -111,7 +112,12 @@ function initData() {
     { id: uuidv4(), fieldKey: 'title', fieldLabel: '发明名称', isRequired: true, minLength: 5, orderIndex: 1, isActive: true },
     { id: uuidv4(), fieldKey: 'technicalField', fieldLabel: '技术领域', isRequired: true, minLength: 5, orderIndex: 2, isActive: true },
     { id: uuidv4(), fieldKey: 'backgroundArt', fieldLabel: '背景技术', isRequired: true, minLength: 100, orderIndex: 3, isActive: true },
-    { id: uuidv4(), fieldKey: 'technicalSolution', fieldLabel: '技术方案', isRequired: true, minLength: 200, orderIndex: 4, isActive: true }
+    { id: uuidv4(), fieldKey: 'inventionContent', fieldLabel: '发明内容', isRequired: true, minLength: 50, orderIndex: 4, isActive: true },
+    { id: uuidv4(), fieldKey: 'technicalSolution', fieldLabel: '技术方案', isRequired: true, minLength: 200, orderIndex: 5, isActive: true },
+    { id: uuidv4(), fieldKey: 'beneficialEffects', fieldLabel: '有益效果', isRequired: true, minLength: 50, orderIndex: 6, isActive: true },
+    { id: uuidv4(), fieldKey: 'figureDescription', fieldLabel: '附图说明', isRequired: false, minLength: 0, orderIndex: 7, isActive: true },
+    { id: uuidv4(), fieldKey: 'implementation', fieldLabel: '具体实施方式', isRequired: true, minLength: 100, orderIndex: 8, isActive: true },
+    { id: uuidv4(), fieldKey: 'claimsSuggestion', fieldLabel: '权利要求建议', isRequired: false, minLength: 0, orderIndex: 9, isActive: true }
   ];
 
   // 消息
@@ -119,7 +125,7 @@ function initData() {
     id: uuidv4(),
     type: 'SYSTEM',
     title: '欢迎使用专利交底书智能生成工具',
-    content: '感谢您使用我们的系统！',
+    content: '感谢您使用我们的系统！请先在AI设置中配置API Key以使用AI功能。',
     priority: 'NORMAL',
     isRead: false,
     createdAt: new Date().toISOString()
@@ -296,6 +302,133 @@ app.post('/api/auth/reset-password', async (req, res) => {
   } catch (err) {
     error(res, '令牌无效或已过期', 'INVALID_TOKEN', 400);
   }
+});
+
+// ========== 交底书管理 ==========
+app.get('/api/disclosures', authenticateToken, (req, res) => {
+  const userId = req.user.userId;
+  const enterpriseId = req.user.enterpriseId;
+  
+  // 获取用户所属企业的交底书
+  let disclosures = db.disclosures.filter(d => d.enterpriseId === enterpriseId);
+  
+  // 非管理员只能看到自己的交底书
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN') {
+    disclosures = disclosures.filter(d => d.authorId === userId);
+  }
+  
+  // 按更新时间排序
+  disclosures.sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt));
+  
+  success(res, { list: disclosures, total: disclosures.length });
+});
+
+app.post('/api/disclosures', authenticateToken, (req, res) => {
+  const { type, content } = req.body;
+  
+  if (!type) {
+    return error(res, '请提供交底书类型', 'MISSING_TYPE', 400);
+  }
+  
+  const user = db.users.find(u => u.id === req.user.userId);
+  const disclosure = {
+    id: uuidv4(),
+    enterpriseId: req.user.enterpriseId,
+    type: type || '发明专利',
+    status: 'draft',
+    authorId: req.user.userId,
+    authorName: user?.name || '未知用户',
+    content: content || {
+      title: '',
+      technicalField: '',
+      backgroundArt: '',
+      inventionContent: '',
+      technicalSolution: '',
+      beneficialEffects: '',
+      figureDescription: '',
+      implementation: '',
+      claimsSuggestion: ''
+    },
+    attachments: [],
+    qualityScore: 0,
+    completeness: [],
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+  
+  db.disclosures.push(disclosure);
+  success(res, disclosure, '创建成功', 201);
+});
+
+app.get('/api/disclosures/:id', authenticateToken, (req, res) => {
+  const disclosure = db.disclosures.find(d => d.id === req.params.id);
+  
+  if (!disclosure) {
+    return error(res, '交底书不存在', 'NOT_FOUND', 404);
+  }
+  
+  // 检查权限
+  if (disclosure.enterpriseId !== req.user.enterpriseId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN' && disclosure.authorId !== req.user.userId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  success(res, disclosure);
+});
+
+app.put('/api/disclosures/:id', authenticateToken, (req, res) => {
+  const disclosure = db.disclosures.find(d => d.id === req.params.id);
+  
+  if (!disclosure) {
+    return error(res, '交底书不存在', 'NOT_FOUND', 404);
+  }
+  
+  // 检查权限
+  if (disclosure.enterpriseId !== req.user.enterpriseId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN' && disclosure.authorId !== req.user.userId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  const { type, status, content, attachments, qualityScore, completeness } = req.body;
+  
+  if (type) disclosure.type = type;
+  if (status) disclosure.status = status;
+  if (content) disclosure.content = { ...disclosure.content, ...content };
+  if (attachments) disclosure.attachments = attachments;
+  if (typeof qualityScore === 'number') disclosure.qualityScore = qualityScore;
+  if (completeness) disclosure.completeness = completeness;
+  
+  disclosure.updatedAt = new Date().toISOString();
+  
+  success(res, disclosure, '更新成功');
+});
+
+app.delete('/api/disclosures/:id', authenticateToken, (req, res) => {
+  const index = db.disclosures.findIndex(d => d.id === req.params.id);
+  
+  if (index === -1) {
+    return error(res, '交底书不存在', 'NOT_FOUND', 404);
+  }
+  
+  const disclosure = db.disclosures[index];
+  
+  // 检查权限
+  if (disclosure.enterpriseId !== req.user.enterpriseId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  if (req.user.role !== 'ADMIN' && req.user.role !== 'SUPER_ADMIN' && disclosure.authorId !== req.user.userId) {
+    return error(res, '无权访问', 'FORBIDDEN', 403);
+  }
+  
+  db.disclosures.splice(index, 1);
+  success(res, null, '删除成功');
 });
 
 // ========== 企业账号管理 ==========
@@ -508,7 +641,7 @@ app.post('/api/ai-configs/models', authenticateToken, (req, res) => {
   success(res, config, '添加成功', 201);
 });
 
-// AI润色接口
+// AI润色接口 - 模拟实现
 app.post('/api/ai/polish', authenticateToken, (req, res) => {
   const { content, field } = req.body;
 
@@ -517,15 +650,85 @@ app.post('/api/ai/polish', authenticateToken, (req, res) => {
   }
 
   const config = db.aiConfigs[req.user.enterpriseId];
-  const prompt = config?.prompts?.[field] || '请优化以下内容';
+  const model = config?.models?.find(m => m.enabled);
+  
+  // 检查是否有可用的AI模型配置
+  if (!model || !model.apiKey) {
+    return error(res, '请先配置AI模型API Key', 'AI_NOT_CONFIGURED', 400);
+  }
 
-  const polishedContent = `[AI润色结果]\n\n${content}\n\n[优化说明]\n根据提示词"${prompt}"进行了优化。`;
+  // 模拟AI润色结果
+  const prompts = {
+    title: '优化发明名称，使其更加准确、简洁、规范',
+    technicalField: '优化技术领域描述，明确本发明所属的技术领域',
+    backgroundArt: '优化背景技术描述，清晰阐述现有技术的问题',
+    inventionContent: '优化发明内容，突出技术创新点和有益效果',
+    technicalSolution: '优化技术方案描述，使其更加详细和完整',
+    beneficialEffects: '优化有益效果描述，突出技术优势',
+    figureDescription: '优化附图说明，使图示与文字描述对应',
+    implementation: '优化具体实施方式，使其更加详细和完整',
+    claimsSuggestion: '优化权利要求建议，确保保护范围清晰'
+  };
+
+  const prompt = prompts[field] || '请优化以下内容';
+  
+  const polishedContent = `[AI润色结果 - ${prompt}]
+
+${content}
+
+[优化说明]
+1. 优化了表达准确性
+2. 增强了技术描述的完整性
+3. 提升了专利文档的专业性
+
+注意：这是模拟结果，实际使用时需要配置真实的AI API Key。`;
 
   success(res, {
     originalContent: content,
     polishedContent,
     field,
     timestamp: new Date().toISOString()
+  });
+});
+
+// AI提取接口 - 模拟实现
+app.post('/api/ai/extract', authenticateToken, (req, res) => {
+  const { filename, content } = req.body;
+
+  if (!filename) {
+    return error(res, '请提供文件名', 'MISSING_FILENAME', 400);
+  }
+
+  const config = db.aiConfigs[req.user.enterpriseId];
+  const model = config?.models?.find(m => m.enabled);
+  
+  // 检查是否有可用的AI模型配置
+  if (!model || !model.apiKey) {
+    return success(res, {
+      isPatentDocument: false,
+      documentType: 'unknown',
+      extractedData: {},
+      confidence: 0,
+      missingInfo: ['AI未配置', '请先在AI设置中配置API Key'],
+      suggestions: ['配置豆包AI API Key', '或手动填写交底书内容']
+    });
+  }
+
+  // 模拟AI提取结果
+  success(res, {
+    isPatentDocument: true,
+    documentType: '发明专利',
+    extractedData: {
+      title: '从文档提取的发明名称',
+      technicalField: '从文档提取的技术领域',
+      backgroundArt: '从文档提取的背景技术',
+      inventionContent: '从文档提取的发明内容',
+      technicalSolution: '从文档提取的技术方案',
+      beneficialEffects: '从文档提取的有益效果'
+    },
+    confidence: 75,
+    missingInfo: ['附图说明', '具体实施方式', '权利要求建议'],
+    suggestions: ['补充附图说明', '详细描述具体实施方式', '完善权利要求']
   });
 });
 
@@ -755,18 +958,27 @@ app.get('/api/admin/stats', authenticateToken, (req, res) => {
     return error(res, '需要管理员权限', 'FORBIDDEN', 403);
   }
 
+  const enterpriseId = req.user.enterpriseId;
+  
   const stats = {
     enterprises: {
       total: db.enterprises.length,
       active: db.enterprises.filter(e => e.status === 'ACTIVE').length
     },
     users: {
-      total: db.users.length,
-      active: db.users.filter(u => u.status === 'ACTIVE').length
+      total: db.users.filter(u => u.enterpriseId === enterpriseId).length,
+      active: db.users.filter(u => u.enterpriseId === enterpriseId && u.status === 'ACTIVE').length
+    },
+    disclosures: {
+      total: db.disclosures.filter(d => d.enterpriseId === enterpriseId).length,
+      draft: db.disclosures.filter(d => d.enterpriseId === enterpriseId && d.status === 'draft').length,
+      processing: db.disclosures.filter(d => d.enterpriseId === enterpriseId && d.status === 'processing').length,
+      review: db.disclosures.filter(d => d.enterpriseId === enterpriseId && d.status === 'review').length,
+      approved: db.disclosures.filter(d => d.enterpriseId === enterpriseId && d.status === 'approved').length
     },
     notifications: {
-      total: db.notifications.length,
-      unread: db.notifications.filter(n => !n.isRead).length
+      total: db.notifications.filter(n => !n.userId || n.userId === req.user.userId).length,
+      unread: db.notifications.filter(n => (!n.userId || n.userId === req.user.userId) && !n.isRead).length
     }
   };
 
